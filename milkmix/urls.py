@@ -24,5 +24,6 @@ urlpatterns = [
     path('api/auth/', include("authentications.urls")),
     path('api/payment/', include("payment.urls")),
     path('api/', include("milkhistory.urls")),
+    path('api/', include("Member.urls")),
  
 ]+ static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
