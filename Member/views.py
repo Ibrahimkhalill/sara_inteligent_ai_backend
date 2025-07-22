@@ -35,3 +35,28 @@ def list_farm_members(request, farm_id):
             code=404,
             details={"error": ["Farm not found or not a farm role"]}
         )
+        
+        
+        
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_farm_user_details(request):
+    try:
+        
+        user = request.user
+    
+        if user.role != 'farm_user':
+            return error_response(
+                code=403,
+                details={"error": ["User is not a farm user"]}
+            )
+        member = Member.objects.get(farm_user=user, is_active=True)
+        serializer = MemberSerializer(member)
+        return Response({
+            "message": "Farm user details retrieved successfully",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+    except CustomUser.DoesNotExist:
+        return error_response(
+            code=404,
+            details={"error": ["User not found or not a farm user"]})

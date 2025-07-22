@@ -16,7 +16,7 @@ from django.http import JsonResponse , HttpResponse
 from collections import defaultdict
 from datetime import datetime
 from .models import Subscription , SubscriptionPlan
-from authentications.models import UserProfile, CustomUser
+from authentications.models import  CustomUser
 from .serializers import *
 import os
 from dotenv import load_dotenv
