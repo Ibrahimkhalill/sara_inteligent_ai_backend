@@ -1,4 +1,9 @@
-.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.env
 venv/
-**/migrations/*.pyc
-**/migrations/__pycache__/
+.env
+*.db

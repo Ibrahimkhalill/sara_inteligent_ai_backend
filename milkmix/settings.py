@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'milkhistory',
     'Member',
+    'consultant',
    
    
 ]
