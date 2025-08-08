@@ -22,10 +22,10 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 # Set your Stripe secret key
-stripe.api_key = os.getenv("API_KEY")
+stripe.api_key = os.getenv("STRIPE_API_KEY")
 
 # Webhook secret (get this from your Stripe Dashboard)
-endpoint_secret ="whsec_vgsQoSiGUL0Gv0s2JqECH4OSECIXO3ng"
+endpoint_secret =os.getenv("ENDPOINT_SECRET")
 
 
 
@@ -36,11 +36,10 @@ def create_checkout_session(request):
 
     # Get the data from the frontend
     price_id = request.data.get("price_id")  # Stripe price ID
-    plan_name = request.data.get("plan_name")  # Name of the subscription plan
-    duration_type = request.data.get("duration_type")  # Type of the plan (monthly/yearly)
+  
 
-    if not price_id or not plan_name or not duration_type:
-        return Response({"error": "Missing price_id, plan_name, or plan_type"}, status=400)
+    if not price_id:
+        return Response({"error": "Missing price_id"}, status=400)
 
     user = request.user
 
@@ -55,12 +54,10 @@ def create_checkout_session(request):
                 }
             ],
             mode="subscription",
-            success_url=f"http://localhost:5173/payment/success",
-            cancel_url=f"http://localhost:5173/payment/cancel",
+                success_url=f"http://localhost:5174/payment/success",
+                cancel_url=f"http://localhost:5174/payment/cancel",
             metadata={  # Attach metadata to the session
                 "user_id": str(user.id),  # Include the user ID for tracking
-                "plan_name": plan_name,  # Include the plan name
-                "plan_type": duration_type,  # Include the plan type
                 "custom_note": "Tracking payment for subscription",
             },
         )
@@ -89,6 +86,7 @@ def stripe_webhook(request):
     # Rest of your webhook logic remains unchanged
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
+        print(f"Session completed: {session}")
         metadata = session.get("metadata", {})
         user_id = metadata.get("user_id")
         stripe_subscription_id = session.get("subscription")
@@ -101,6 +99,7 @@ def stripe_webhook(request):
             user = get_object_or_404(CustomUser, id=user_id)
             stripe_subscription = stripe.Subscription.retrieve(stripe_subscription_id)
             subscription_item = stripe_subscription["items"]["data"][0]
+ 
             current_period_start = subscription_item.get("current_period_start")
             current_period_end = subscription_item.get("current_period_end")
 
@@ -153,8 +152,46 @@ def stripe_webhook(request):
                 subscription.save()
             except Subscription.DoesNotExist:
                 pass
+    elif event["type"] == "invoice.paid":
+        invoice = event["data"]["object"]
+        subscription_id = invoice.get("subscription")
+
+        try:
+            stripe_subscription = stripe.Subscription.retrieve(subscription_id)
+            user_id = stripe_subscription.get("metadata", {}).get("user_id")
+
+            if not user_id:
+                print(f"Missing user_id in metadata for renewal: {stripe_subscription}")
+                return Response({"error": "Missing user_id for renewal"}, status=400)
+
+            user = get_object_or_404(CustomUser, id=user_id)
+
+            subscription_item = stripe_subscription["items"]["data"][0]
+            current_period_start = datetime.fromtimestamp(subscription_item["current_period_start"])
+            current_period_end = datetime.fromtimestamp(subscription_item["current_period_end"])
+
+            plan_id = subscription_item["price"]["id"]
+            subscription_plan = get_object_or_404(SubscriptionPlan, price_id=plan_id)
+
+            # Update subscription for renewal
+            subscription = Subscription.objects.get(user=user)
+            subscription.start_date = current_period_start
+            subscription.end_date = current_period_end
+            subscription.plan = subscription_plan
+            subscription.price = subscription_plan.amount
+            subscription.status = "premium"
+            subscription.is_active = True
+            subscription.save()
+
+            print(f"Subscription renewed for user {user.email}")
+
+        except Exception as e:
+            print(f"Error processing renewal for subscription {subscription_id}: {str(e)}")
+            return Response({"error": "Error processing renewal"}, status=400)
 
     return Response({"status": "success"}, status=200)
+
+
 def checkout_success(request):
     return HttpResponse("Your checkout was successful!", status=200)
 
@@ -195,6 +232,37 @@ def get_all_plan(request):
     serializer = SubscriptionPlanSerializer(plans, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_subscription_invoices(request):
+    user = request.user
+
+    try:
+        subscription = Subscription.objects.get(user=user)
+        stripe_subscription_id = subscription.stripe_subscription_id
+
+        period_end = subscription.end_date.strftime('%m/%d/%Y') if subscription.end_date else None
+
+        invoices = stripe.Invoice.list(subscription=stripe_subscription_id)
+
+        invoice_data = []
+        for inv in invoices.auto_paging_iter():
+            invoice_data.append({
+                "plan": subscription.plan.name,
+                "issue_date": datetime.fromtimestamp(inv.created).strftime('%m/%d/%Y'),
+                "expire_date": period_end,
+                "amount": f"${inv.amount_paid / 100:.2f}",
+                "invoice_pdf": inv.invoice_pdf
+            })
+
+        return Response({"invoices": invoice_data}, status=200)
+
+    except Subscription.DoesNotExist:
+        # Return empty invoices list instead of 404
+        return Response({"invoices": []}, status=200)
+    except Exception as e:
+        print("Error:", str(e))
+        return Response({"error": str(e)}, status=500)
 
 
 

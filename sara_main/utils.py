@@ -34,6 +34,6 @@ def error_response(code, message=None, details=None):
 
     return Response({
         "code": code,
-        "error": message,
+        "message": message,
         "details": details if details else {}
     }, status=code)

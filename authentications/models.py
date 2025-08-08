@@ -29,9 +29,8 @@ class CustomUserManager(BaseUserManager):
 class CustomUser(AbstractBaseUser, PermissionsMixin):
     ROLES = (
         ('admin', 'Admin'),
-        ('farm', 'Farm'),
-        ('consultant', 'Consultant'),
-        ('farm_user', 'Farm User'),
+        ('user', 'user'),
+    
     )
     email = models.EmailField(_('email address'), unique=True)
     role = models.CharField(max_length=10, choices=ROLES, default='farm')
@@ -43,6 +42,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     REQUIRED_FIELDS = []
 
     objects = CustomUserManager()
+    
+    class Meta:
+        verbose_name = _('user')
+        verbose_name_plural = _('users')
+        ordering = ['email']
 
     def __str__(self):
         return f"{self.email} ({self.role})"
@@ -50,6 +54,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 class OTP(models.Model):
     email = models.EmailField()
     otp = models.CharField(max_length=6)
+    secret_key = models.CharField(max_length=100, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     attempts = models.IntegerField(default=0)
 
@@ -74,9 +79,14 @@ class UserProfile(models.Model):
         related_name='user_profile'
     )
     
-    name = models.CharField(max_length=200, blank=True, null=True)
+    first_name = models.CharField(max_length=200, blank=True, null=True)
+    last_name = models.CharField(max_length=200, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    company_name = models.CharField(max_length=500, blank=True, null=True)
     phone_number = models.CharField(max_length=20, blank=True, null=True)
+    country_code = models.CharField(max_length=20, blank=True, null=True)
     profile_picture = models.ImageField(upload_to="profile", blank=True, null=True)
+    google_profile_picture = models.URLField(blank=True, null=True)
     joined_date = models.DateTimeField(auto_now_add=True, blank=True, null=True)
     
     def __str__(self):

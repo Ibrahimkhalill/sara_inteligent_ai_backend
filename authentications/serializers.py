@@ -10,12 +10,20 @@ from rest_framework import serializers
 
 class CustomUserSerializer(serializers.ModelSerializer):
     user_profile = serializers.SerializerMethodField()
- 
-   
+    email_address = serializers.EmailField(source='email', read_only=True)
+    is_subscribed = serializers.SerializerMethodField()
+
     class Meta:
         model = CustomUser
-        fields = ['id', 'email', 'role', 'is_verified', 'user_profile']
-        read_only_fields = ['id', 'is_active', 'is_staff', 'is_superuser', 'role']
+        fields = ['id', 'email_address', 'role', 'is_verified', 'user_profile', 'is_subscribed']
+        read_only_fields = ['id', 'is_active', 'is_staff', 'is_superuser']
+ 
+    def get_is_subscribed(self, obj):
+        try:
+            subscription = Subscription.objects.get(user=obj)
+            return subscription.is_active
+        except Subscription.DoesNotExist:
+            return False
 
     def get_user_profile(self, obj):
         try:
@@ -28,13 +36,14 @@ class CustomUserSerializer(serializers.ModelSerializer):
 
 class CustomUserCreateSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=True)
-    name = serializers.CharField(write_only=True, required=True)
+    first_name = serializers.CharField(write_only=True, required=True)
+    last_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     email = serializers.EmailField(required=True)
     role = serializers.ChoiceField(choices=CustomUser.ROLES, default='user')
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'password', 'role', 'name']
+        fields = ['id', 'email', 'password', 'role', 'first_name', 'last_name']
         extra_kwargs = {
             'email': {'required': True},
             'password': {'required': True}
@@ -46,10 +55,10 @@ class CustomUserCreateSerializer(serializers.ModelSerializer):
             errors['email'] = ['This field is required']
         if not data.get('password'):
             errors['password'] = ['This field is required']
-        if not data.get('name'):
-            errors['name'] = ['This field is required']
+        if not data.get('first_name'):
+            errors['first_name'] = ['This field is required']
         if data.get('email') and User.objects.filter(email=data['email'], is_verified=True).exists():
-            errors['email'] = ['A user with this email already exists']
+            errors['email'] = ['This email already exists']
         if data.get('role') and data['role'] not in dict(CustomUser.ROLES).keys():
             errors['role'] = [f"Invalid role. Must be one of: {', '.join(dict(CustomUser.ROLES).keys())}"]
         if errors:
@@ -57,14 +66,15 @@ class CustomUserCreateSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-        name = validated_data.pop('name')
+        first_name = validated_data.pop('first_name')
+        last_name = validated_data.pop('last_name')
         User.objects.filter(email=validated_data['email'], is_verified=False).delete()
         user = User.objects.create_user(
             email=validated_data['email'],
             password=validated_data['password'],
             role=validated_data.get('role', 'user')
         )
-        UserProfile.objects.create(user=user, name=name)
+        UserProfile.objects.create(user=user, first_name=first_name , last_name=last_name)
         return user
 
 class OTPSerializer(serializers.ModelSerializer):
@@ -87,18 +97,13 @@ class OTPSerializer(serializers.ModelSerializer):
         return data
 
 class UserProfileSerializer(serializers.ModelSerializer):
+    
     class Meta:
         model = UserProfile
-        fields = ['id', 'user', 'name', 'profile_picture', 'phone_number', 'joined_date']
+        fields = ['id', 'user', 'first_name', 'last_name', 'profile_picture', 'google_profile_picture', 'address','company_name','country_code', 'phone_number', 'joined_date']
         read_only_fields = ['id', 'user', 'joined_date']
 
-    def validate(self, data):
-        errors = {}
-        if 'name' in data and not data['name']:
-            errors['name'] = ['Name cannot be empty']
-        if errors:
-            raise serializers.ValidationError(errors)
-        return data
+    
 
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)

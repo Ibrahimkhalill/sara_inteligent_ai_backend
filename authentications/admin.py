@@ -30,8 +30,8 @@ admin.site.register(CustomUser)
 # Register other models
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
-    list_display = ('user', 'name','phone_number')
-    search_fields = ('user__email', 'name', 'phone_number')
+    list_display = ('user', 'first_name','last_name','phone_number')
+    search_fields = ('user__email', 'first_name', 'phone_number')
 
 @admin.register(OTP)
 class OTPAdmin(admin.ModelAdmin):

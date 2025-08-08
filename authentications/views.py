@@ -16,11 +16,10 @@ from .serializers import (
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
-from payment.models import Subscription
-from payment.serializers import SubscriptionSerializer
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
-from milkmix.utils import error_response
+import uuid
+from sara_main.utils import error_response
 import random
 
 def generate_otp():
@@ -61,6 +60,8 @@ def register_user(request):
             try:
                 send_otp_email(email=user.email, otp=otp)
             except Exception as e:
+                import traceback
+                traceback.print_exc()  # ✅ Logs full stack trace in terminal
                 return error_response(
                     code=500,
                     message="Failed to send OTP email",
@@ -68,7 +69,8 @@ def register_user(request):
                 )
         return Response({
             "message": "User registered. Please verify your email with the OTP sent",
-            "user": serializer.data
+            "user_id": user.id,
+            "email": user.email,
         }, status=status.HTTP_201_CREATED)
     return error_response(code=400, details=serializer.errors)
 
@@ -81,6 +83,7 @@ def login(request):
     if serializer.is_valid():
         user = serializer.validated_data
         refresh = RefreshToken.for_user(user)
+        
         try:
             is_verified = user.is_verified
             profile = user.user_profile
@@ -90,12 +93,77 @@ def login(request):
         return Response({
             "access_token": str(refresh.access_token),
             "refresh_token": str(refresh),
+            "email_address": user.email,
             "role": user.role,
             "is_verified" : is_verified,
-            "profile": profile_serializer.data
+            "profile": profile_serializer.data,
+            "access_token_valid_till": int(refresh.access_token.lifetime.total_seconds()*1000),
         }, status=status.HTTP_200_OK)
     return error_response(code=401, details=serializer.errors)
 
+
+
+@api_view(['POST'])
+def google_login(request):
+    data = request.data
+    email = data.get("email")
+    name = data.get("name", "")
+    picture = data.get("picture", "")
+    google_id = data.get("google_id", "")  # you may consider renaming this to 'sub'
+
+    if not email:
+        return Response({"error": "Email is required"}, status=400)
+
+    # Split full name into first and last
+    first_name, *rest = name.split(" ")
+    last_name = " ".join(rest) if rest else ""
+
+    user, created = User.objects.get_or_create(
+        email=email,
+        defaults={
+            "is_verified": True,
+            "role": "user",
+            "password": google_id 
+        }
+    )
+
+    # Always get or create profile to avoid "profile not defined" error
+    profile, _ = UserProfile.objects.get_or_create(
+        user=user,
+        defaults={
+            "first_name": first_name,
+            "last_name": last_name,
+            "profile_picture": picture,
+        }
+    )
+
+    # Update profile if needed (e.g. if picture or name changed from Google)
+    if not created:
+        updated = False
+        if not profile.first_name and first_name:
+            profile.first_name = first_name
+            updated = True
+        if not profile.last_name and last_name:
+            profile.last_name = last_name
+            updated = True
+        if picture and profile.google_profile_picture != picture:
+            profile.google_profile_picture = picture
+            updated = True
+        if updated:
+            profile.save()
+
+    profile_serializer = UserProfileSerializer(profile)
+    refresh = RefreshToken.for_user(user)
+
+    return Response({
+        "access_token": str(refresh.access_token),
+        "refresh_token": str(refresh),
+        "email_address": user.email,
+        "role": user.role,
+        "is_verified": user.is_verified,
+        "profile": profile_serializer.data,
+        "access_token_valid_till": int(refresh.access_token.lifetime.total_seconds() * 1000),
+    })
 
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
@@ -132,7 +200,8 @@ def user_profile(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def create_otp(request):
-    email = request.data.get('email')
+    user_id = request.data.get('user_id')
+    email = user_id and User.objects.filter(id=user_id).first().email 
     if not email:
         return error_response(
             code=400,
@@ -172,13 +241,22 @@ def create_otp(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def verify_otp_reset(request):
-    email = request.data.get('email')
+    user_id = request.data.get('user_id')
     otp_value = request.data.get('otp')
+    user = User.objects.filter(id=user_id).first()
+    if not user:
+        return error_response(
+            code=400,
+            details={"user_id": ["User does not exist."]}
+        )
+    
+    # Now it's safe to use user.email   
+    email = user.email
     
     if not email or not otp_value:
         details = {}
         if not email:
-            details["email"] = ["This field is required"]
+            details["user id"] = ["This field is required"]
         if not otp_value:
             details["otp"] = ["This field is required"]
         return error_response(code=400, details=details)
@@ -195,7 +273,12 @@ def verify_otp_reset(request):
                 code=400,
                 details={"otp": ["The OTP has expired"]}
             )
-        return Response({"message": "OTP verified successfully"})
+            
+       
+        secret_key = str(uuid.uuid4())
+        otp_obj.secret_key = secret_key
+        otp_obj.save()
+        return Response({"message": "OTP verified successfully","secret_key" : secret_key, "user_id" : user_id}, status=status.HTTP_200_OK)
     except OTP.DoesNotExist:
         return error_response(
             code=404,
@@ -204,19 +287,23 @@ def verify_otp_reset(request):
         
 @api_view(['POST'])
 def verify_otp(request):
-    email = request.data.get('email')
+    print("Request data:", request.data)
+    user_id = request.data.get('user_id')
+    print(user_id)
     otp_value = request.data.get('otp')
+    user = User.objects.filter(id=user_id).first()
     
-    if not email or not otp_value:
+    if not user_id or not otp_value:
         details = {}
-        if not email:
-            details["email"] = ["This field is required"]
+        if not user_id:
+            details["user_id"] = ["This field is required"]
         if not otp_value:
             details["otp"] = ["This field is required"]
         return error_response(code=400, details=details)
     
+    
     try:
-        otp_obj = OTP.objects.get(email=email)
+        otp_obj = OTP.objects.get(email=user.email)
         if otp_obj.otp != otp_value:
             return error_response(
                 code=400,
@@ -230,7 +317,7 @@ def verify_otp(request):
         
         # Verify the user
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email=user.email)
             if user.is_verified:
                 return error_response(
                     code=400,
@@ -255,6 +342,7 @@ def verify_otp(request):
                 "message": "Email verified successfully",
                 "access_token": str(refresh.access_token),
                 "refresh_token": str(refresh),
+                "email_address": user.email,
                 "role": user.role,
                 "is_verified": user.is_verified,
                 "profile": profile_serializer.data
@@ -297,6 +385,7 @@ def request_password_reset(request):
     otp_data = {'email': email, 'otp': otp}
     OTP.objects.filter(email=email).delete()
     serializer = OTPSerializer(data=otp_data)
+    user_id = User.objects.get(email=email).id
     if serializer.is_valid():
         serializer.save()
         try:
@@ -307,38 +396,50 @@ def request_password_reset(request):
                 message="Failed to send OTP email",
                 details={"error": [str(e)]}
             )
-        return Response({"message": "OTP sent to your email"}, status=status.HTTP_201_CREATED)
+        return Response({"message": "OTP sent to your email","user_id":user_id }, status=status.HTTP_201_CREATED)
     return error_response(code=400, details=serializer.errors)
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def reset_password(request):
-    email = request.data.get('email')
-    otp_value = request.data.get('otp')
+    user_id = request.data.get('user_id')
+    secret_key = request.data.get('secret_key')
+    
+    user = User.objects.filter(id=user_id).first()
+    if not user:
+        return error_response(
+            code=400,
+            details={"user_id": ["User does not exist."]}
+        )
+    
+    # Now it's safe to use user.email   
+    email = user.email
     new_password = request.data.get('new_password')
 
-    if not all([email, otp_value, new_password]):
+    if not all([email, new_password , secret_key]):
         details = {}
         if not email:
-            details["email"] = ["This field is required"]
-        
+            details["user id"] = ["This field is required"]
+        if not secret_key:
+            details["secret_key"] = ["This field is required"]
         if not new_password:
             details["new_password"] = ["This field is required"]
         return error_response(code=400, details=details)
 
     try:
         otp_obj = OTP.objects.get(email=email)
-        if otp_obj.otp != otp_value:
+        if otp_obj.secret_key != secret_key:
             return error_response(
                 code=400,
-                details={"otp": ["The provided OTP is invalid"]}
+                details={"secret_key": ["The provided secret key is invalid"]}
             )
+        
        
         user = User.objects.get(email=email)
         if not user.is_verified:
             return error_response(
                 code=400,
-                details={"email": ["Please verify your email before resetting your password"]}
+                details={"user": ["Please verify your email before resetting your password"]}
             )
         try:
             validate_password(new_password, user)
@@ -395,3 +496,27 @@ def change_password(request):
     user.set_password(new_password)
     user.save()
     return Response({'message': 'Password changed successfully'}, status=status.HTTP_200_OK)
+
+
+
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def get_access_token_by_refresh_token(request):
+    refresh_token = request.data.get('refresh_token')
+    if not refresh_token:
+        return error_response(
+            code=400,
+            details={"refresh_token": ["This field is required"]}
+        )
+    try:
+        refresh = RefreshToken(refresh_token)
+        access_token = str(refresh.access_token)
+        return Response({"access_token": access_token}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return error_response(
+            code=400,
+            details={"error": [str(e)]}
+        )
+   
