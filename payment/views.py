@@ -27,7 +27,7 @@ stripe.api_key = os.getenv("STRIPE_API_KEY")
 # Webhook secret (get this from your Stripe Dashboard)
 endpoint_secret =os.getenv("ENDPOINT_SECRET")
 
-
+print("endpoint_secret",endpoint_secret)
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -54,8 +54,8 @@ def create_checkout_session(request):
                 }
             ],
             mode="subscription",
-                success_url=f"http://localhost:5174/payment/success",
-                cancel_url=f"http://localhost:5174/payment/cancel",
+                success_url=f"http://127.0.0.1:3901/payment/success",
+                cancel_url=f"http://127.0.0.1:3901/payment/cancel",
             metadata={  # Attach metadata to the session
                 "user_id": str(user.id),  # Include the user ID for tracking
                 "custom_note": "Tracking payment for subscription",
@@ -244,6 +244,7 @@ def get_subscription_invoices(request):
         period_end = subscription.end_date.strftime('%m/%d/%Y') if subscription.end_date else None
 
         invoices = stripe.Invoice.list(subscription=stripe_subscription_id)
+        print("invoices",len(invoices))
 
         invoice_data = []
         for inv in invoices.auto_paging_iter():

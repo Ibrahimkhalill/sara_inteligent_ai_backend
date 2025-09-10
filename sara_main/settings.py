@@ -50,7 +50,9 @@ INSTALLED_APPS = [
     'payment',
     'apscheduler',
     'corsheaders',
-    'chatbot'
+    'chatbot',
+    'booking',
+    'notification'
    
    
    

@@ -1,0 +1,10 @@
+# subscriptions/urls.py
+
+from django.urls import path
+from . import views
+
+urlpatterns = [
+
+    path("save-fcm-token/", views.save_fcm_token),
+
+]

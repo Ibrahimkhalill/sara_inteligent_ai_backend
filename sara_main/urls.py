@@ -24,6 +24,8 @@ urlpatterns = [
     path('api/auth/', include("authentications.urls")),
     path('api/payment/', include("payment.urls")),
     path('api/chatbot/', include("chatbot.urls")),
+    path('api/booking/', include("booking.urls")),
+    path('api/notification/', include("notification.urls")),
   
  
 ]+ static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
