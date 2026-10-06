@@ -33,7 +33,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     
     )
     email = models.EmailField(_('email address'), unique=True)
-    role = models.CharField(max_length=10, choices=ROLES, default='farm')
+    role = models.CharField(max_length=10, choices=ROLES, default='user')
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     is_verified = models.BooleanField(default=False)
@@ -63,12 +63,13 @@ class OTP(models.Model):
 
     def save(self, *args, **kwargs):
         with transaction.atomic():
-            OTP.objects.filter(email=self.email).delete()
+            # Keep only one OTP per email (don't delete this row when updating it)
+            OTP.objects.filter(email=self.email).exclude(pk=self.pk).delete()
             super().save(*args, **kwargs)
 
     def is_expired(self):
         from django.utils import timezone
-        return (timezone.now() - self.created_at).seconds > 120
+        return (timezone.now() - self.created_at).total_seconds() > 120
 
 class UserProfile(models.Model):
     user = models.OneToOneField(

@@ -8,6 +8,7 @@ charset-normalizer==3.4.2
 colorama==0.4.6
 distro==1.9.0
 Django==5.2.3
+firebase-admin==6.9.0
 django-cors-headers==4.7.0
 django-jazzmin==3.0.1
 djangorestframework==3.16.0

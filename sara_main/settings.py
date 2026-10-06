@@ -18,22 +18,20 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 import os
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(BASE_DIR / '.env')
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-4tlcs4%j!v@6471!sy5r=8&t#i0#g!m39#j!1mtp%gp&l+sdtt'
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DJANGO_DEBUG', 'False').lower() in ('true', '1', 'yes')
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = os.getenv('DJANGO_ALLOWED_HOSTS', '*').split(',')
 
-CSRF_TRUSTED_ORIGINS = [
-    'https://lamprey-included-lion.ngrok-free.app',
-]
+CSRF_TRUSTED_ORIGINS = [o for o in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if o]
 # Application definition
 
 INSTALLED_APPS = [
@@ -58,13 +56,14 @@ INSTALLED_APPS = [
    
 ]
 
-# CORS_ALLOWED_ORIGINS = [
-#     "http://192.168.10.12:5173",  # Frontend IP
-# ]
+# Comma-separated list of allowed frontend origins. If empty, all origins are
+# allowed (without credentials) - set this in production.
+CORS_ALLOWED_ORIGINS = [o for o in os.getenv('CORS_ALLOWED_ORIGINS', '').split(',') if o]
 
-CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_ORIGINS = not CORS_ALLOWED_ORIGINS
 
-CORS_ALLOW_ALL_ORIGINS = True
+# Never send credentials to arbitrary origins
+CORS_ALLOW_CREDENTIALS = bool(CORS_ALLOWED_ORIGINS)
 
 
 MIDDLEWARE = [
@@ -80,7 +79,8 @@ MIDDLEWARE = [
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # Bearer header (mobile/API) or httpOnly cookie (web app)
+        'sara_main.authentication.CookieJWTAuthentication',
     ),
 }
 
@@ -90,6 +90,16 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
 }
+
+# httpOnly auth cookies for the web frontend
+AUTH_COOKIE_ACCESS = 'access_token'
+AUTH_COOKIE_REFRESH = 'refresh_token'
+AUTH_COOKIE_REFRESH_PATH = '/api/auth/'
+AUTH_COOKIE_SECURE = os.getenv('AUTH_COOKIE_SECURE', str(not DEBUG)).lower() in ('true', '1', 'yes')
+# Lax works when frontend and API share a site (e.g. app.example.com + api.example.com).
+# Use None (requires AUTH_COOKIE_SECURE=True) if they are on different domains.
+AUTH_COOKIE_SAMESITE = os.getenv('AUTH_COOKIE_SAMESITE', 'Lax')
+AUTH_COOKIE_DOMAIN = os.getenv('AUTH_COOKIE_DOMAIN') or None
 
 AUTH_USER_MODEL = 'authentications.CustomUser'
 
@@ -158,7 +168,7 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'  # For collectstatic in production
 STATICFILES_DIRS = [
-    BASE_DIR / 'static',  # App-level static directory
+    p for p in [BASE_DIR / 'static'] if p.exists()  # App-level static directory
 ]
 
 MEDIA_URL = '/media/'  # URL to access media files
@@ -171,10 +181,28 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'hijabpoint374@gmail.com'
-EMAIL_HOST_PASSWORD = 'sbog hrdj icpg zodj'  # Ensure this is correct
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes')
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+
+# Google Sign-In: comma-separated OAuth client IDs (web, Android, iOS) that
+# ID tokens may be issued for
+GOOGLE_CLIENT_IDS = [c for c in os.getenv('GOOGLE_CLIENT_IDS', '').split(',') if c]
+
+# Frontend base URL used for Stripe checkout redirects
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://127.0.0.1:3901').rstrip('/')
+
+# Run the notification scheduler in this process (disable on extra web workers)
+ENABLE_SCHEDULER = os.getenv('ENABLE_SCHEDULER', 'True').lower() in ('true', '1', 'yes')
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {'console': {'class': 'logging.StreamHandler'}},
+    'root': {'handlers': ['console'], 'level': 'INFO'},
+}
 

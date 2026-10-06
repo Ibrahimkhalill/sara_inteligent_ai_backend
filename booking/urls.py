@@ -7,5 +7,6 @@ urlpatterns = [
   
     path("list/", views.booking_list_create),
     path("create/", views.booking_list_create),
+    path("<int:pk>/", views.booking_detail),
 
 ]

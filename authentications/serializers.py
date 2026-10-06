@@ -12,10 +12,15 @@ class CustomUserSerializer(serializers.ModelSerializer):
     user_profile = serializers.SerializerMethodField()
     email_address = serializers.EmailField(source='email', read_only=True)
     is_subscribed = serializers.SerializerMethodField()
+    # False for Google-only accounts, which can't use "change password"
+    has_password = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomUser
-        fields = ['id', 'email_address', 'role', 'is_verified', 'user_profile', 'is_subscribed']
+        fields = ['id', 'email_address', 'role', 'is_verified', 'user_profile', 'is_subscribed', 'has_password']
+
+    def get_has_password(self, obj):
+        return obj.has_usable_password()
         read_only_fields = ['id', 'is_active', 'is_staff', 'is_superuser']
  
     def get_is_subscribed(self, obj):
@@ -67,7 +72,7 @@ class CustomUserCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         first_name = validated_data.pop('first_name')
-        last_name = validated_data.pop('last_name')
+        last_name = validated_data.pop('last_name', '')
         User.objects.filter(email=validated_data['email'], is_verified=False).delete()
         user = User.objects.create_user(
             email=validated_data['email'],

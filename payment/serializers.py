@@ -7,6 +7,7 @@ from .models import Subscription
 
 class SubscriptionSerializer(serializers.ModelSerializer):
     # user = CustomUserSerializer(read_only=True)
+    plan_name = serializers.CharField(source='plan.name', read_only=True, default=None)
 
     class Meta:
         model = Subscription
