@@ -10,5 +10,8 @@ urlpatterns = [
     path("cancel/", views.checkout_cencel, name="checkout_cancel"),
     path("me/", views.get_subscription_invoices, name="get_subscription_invoices"),
     path("all-plan/", views.get_all_plan, name="get_all_plan"),
+    path("subscription/", views.get_subscription, name="get_subscription"),
+    path("subscription/cancel/", views.cancel_subscription, name="cancel_subscription"),
+    path("subscription/resume/", views.resume_subscription, name="resume_subscription"),
 
 ]

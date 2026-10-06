@@ -14,4 +14,5 @@ urlpatterns = [
     path('password-change/', views.change_password),
     path('reset/otp-verify/', views.verify_otp_reset),
     path('refresh/', views.get_access_token_by_refresh_token),
+    path('logout/', views.logout),
 ]

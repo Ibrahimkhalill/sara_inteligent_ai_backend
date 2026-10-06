@@ -7,6 +7,10 @@ User = get_user_model()
 class Notification(models.Model):
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="notifications")
+    # Reminders for a booking are rescheduled/removed with it
+    booking = models.ForeignKey(
+        'booking.Booking', on_delete=models.CASCADE, related_name="reminders",
+        blank=True, null=True)
     message = models.TextField(blank=True, null=True)
     notify_at = models.DateTimeField()
     sent = models.BooleanField(default=False)
@@ -22,4 +26,4 @@ class FCMToken(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.user.username} - {self.token[:10]}..."
+        return f"{self.user.email} - {self.token[:10]}..."

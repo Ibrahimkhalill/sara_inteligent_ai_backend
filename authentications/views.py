@@ -19,20 +19,85 @@ from django.template.loader import render_to_string
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 import uuid
+import secrets
+import logging
+import requests as http_requests
+from django.conf import settings
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
 from sara_main.utils import error_response
-import random
+from sara_main.authentication import set_auth_cookies, set_access_cookie, clear_auth_cookies
+
+logger = logging.getLogger(__name__)
+
+MAX_OTP_ATTEMPTS = 5
+
 
 def generate_otp():
-    return str(random.randint(100000, 999999))
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def check_otp(otp_obj, otp_value):
+    """Validate an OTP, counting failed attempts. Returns an error Response or None."""
+    if otp_obj.attempts >= MAX_OTP_ATTEMPTS:
+        otp_obj.delete()
+        return error_response(
+            code=429,
+            details={"otp": ["Too many failed attempts. Please request a new OTP"]}
+        )
+    if not secrets.compare_digest(otp_obj.otp, str(otp_value)):
+        otp_obj.attempts += 1
+        otp_obj.save(update_fields=["attempts"])
+        return error_response(
+            code=400,
+            details={"otp": ["The provided OTP is invalid"]}
+        )
+    if otp_obj.is_expired():
+        return error_response(
+            code=400,
+            details={"otp": ["The OTP has expired"]}
+        )
+    return None
 
 User = get_user_model()
+
+def verify_google_access_token(access_token):
+    """
+    Verify a Google OAuth access token (from the frontend's useGoogleLogin) and
+    return the user's info, or None if the token is invalid or was issued to
+    another app.
+    """
+    try:
+        token_info = http_requests.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"access_token": access_token},
+            timeout=10,
+        )
+        if token_info.status_code != 200:
+            return None
+        # The token must have been issued to one of our OAuth clients
+        if token_info.json().get("aud") not in settings.GOOGLE_CLIENT_IDS:
+            return None
+
+        user_info = http_requests.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        if user_info.status_code != 200:
+            return None
+        return user_info.json()
+    except http_requests.RequestException:
+        logger.exception("Failed to verify Google access token")
+        return None
+
 
 def send_otp_email(email, otp):
     html_content = render_to_string('otp_email_template.html', {'otp': otp, 'email': email})
     msg = EmailMultiAlternatives(
         subject='Your OTP Code',
         body=f'Your OTP is {otp}',
-        from_email='hijabpoint374@gmail.com',
+        from_email=settings.DEFAULT_FROM_EMAIL,
         to=[email]
     )
     msg.attach_alternative(html_content, "text/html")
@@ -59,14 +124,9 @@ def register_user(request):
             otp_serializer.save()
             try:
                 send_otp_email(email=user.email, otp=otp)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()  # ✅ Logs full stack trace in terminal
-                return error_response(
-                    code=500,
-                    message="Failed to send OTP email",
-                    details={"error": [str(e)]}
-                )
+            except Exception:
+                logger.exception("Failed to send OTP email to %s", user.email)
+                return error_response(code=500, message="Failed to send OTP email")
         return Response({
             "message": "User registered. Please verify your email with the OTP sent",
             "user_id": user.id,
@@ -82,15 +142,33 @@ def login(request):
     serializer = LoginSerializer(data=request.data)
     if serializer.is_valid():
         user = serializer.validated_data
+
+        # Unverified accounts get a fresh OTP instead of tokens
+        if not user.is_verified:
+            otp = generate_otp()
+            OTP(email=user.email, otp=otp).save()
+            try:
+                send_otp_email(email=user.email, otp=otp)
+            except Exception:
+                logger.exception("Failed to send OTP email to %s", user.email)
+                return error_response(code=500, message="Failed to send OTP email")
+            return Response({
+                "code": 403,
+                "message": "Please verify your email. We have sent a new OTP to your inbox.",
+                "details": {"email": ["Email is not verified"]},
+                "user_id": user.id,
+                "is_verified": False,
+            }, status=status.HTTP_403_FORBIDDEN)
+
         refresh = RefreshToken.for_user(user)
-        
+
+        is_verified = user.is_verified
         try:
-            is_verified = user.is_verified
             profile = user.user_profile
         except UserProfile.DoesNotExist:
-            profile = UserProfile.objects.create(user=user, name=user.email.split('@')[0])
+            profile = UserProfile.objects.create(user=user, first_name=user.email.split('@')[0])
         profile_serializer = UserProfileSerializer(profile)
-        return Response({
+        response = Response({
             "access_token": str(refresh.access_token),
             "refresh_token": str(refresh),
             "email_address": user.email,
@@ -99,20 +177,42 @@ def login(request):
             "profile": profile_serializer.data,
             "access_token_valid_till": int(refresh.access_token.lifetime.total_seconds()*1000),
         }, status=status.HTTP_200_OK)
+        return set_auth_cookies(response, refresh)
     return error_response(code=401, details=serializer.errors)
 
 
 
 @api_view(['POST'])
+@permission_classes([AllowAny])
 def google_login(request):
-    data = request.data
-    email = data.get("email")
-    name = data.get("name", "")
-    picture = data.get("picture", "")
-    google_id = data.get("google_id", "")  # you may consider renaming this to 'sub'
+    id_token = request.data.get("id_token")
+    access_token = request.data.get("access_token")
+    if not id_token and not access_token:
+        return error_response(code=400, details={"access_token": ["This field is required"]})
 
-    if not email:
-        return Response({"error": "Email is required"}, status=400)
+    if not settings.GOOGLE_CLIENT_IDS:
+        logger.error("GOOGLE_CLIENT_IDS is not configured")
+        return error_response(code=500, message="Google login is not configured")
+
+    # Verify the token with Google instead of trusting client-supplied data
+    if id_token:
+        try:
+            id_info = google_id_token.verify_oauth2_token(
+                id_token, google_requests.Request(), audience=settings.GOOGLE_CLIENT_IDS
+            )
+        except ValueError:
+            return error_response(code=401, details={"id_token": ["Invalid Google token"]})
+    else:
+        id_info = verify_google_access_token(access_token)
+        if id_info is None:
+            return error_response(code=401, details={"access_token": ["Invalid Google token"]})
+
+    email = id_info.get("email")
+    if not email or str(id_info.get("email_verified")).lower() != "true":
+        return error_response(code=401, details={"email": ["Google account email is not verified"]})
+
+    name = id_info.get("name", "")
+    picture = id_info.get("picture", "")
 
     # Split full name into first and last
     first_name, *rest = name.split(" ")
@@ -123,9 +223,15 @@ def google_login(request):
         defaults={
             "is_verified": True,
             "role": "user",
-            "password": google_id 
         }
     )
+    if created:
+        user.set_unusable_password()
+        user.save(update_fields=["password"])
+    elif not user.is_verified:
+        # Google has verified this email address
+        user.is_verified = True
+        user.save(update_fields=["is_verified"])
 
     # Always get or create profile to avoid "profile not defined" error
     profile, _ = UserProfile.objects.get_or_create(
@@ -133,7 +239,7 @@ def google_login(request):
         defaults={
             "first_name": first_name,
             "last_name": last_name,
-            "profile_picture": picture,
+            "google_profile_picture": picture,
         }
     )
 
@@ -155,7 +261,7 @@ def google_login(request):
     profile_serializer = UserProfileSerializer(profile)
     refresh = RefreshToken.for_user(user)
 
-    return Response({
+    response = Response({
         "access_token": str(refresh.access_token),
         "refresh_token": str(refresh),
         "email_address": user.email,
@@ -164,6 +270,7 @@ def google_login(request):
         "profile": profile_serializer.data,
         "access_token_valid_till": int(refresh.access_token.lifetime.total_seconds() * 1000),
     })
+    return set_auth_cookies(response, refresh)
 
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
@@ -180,7 +287,7 @@ def user_profile(request):
     try:
         profile = request.user.user_profile
     except UserProfile.DoesNotExist:
-        profile = UserProfile.objects.create(user=request.user, name=request.user.email.split('@')[0])
+        profile = UserProfile.objects.create(user=request.user, first_name=request.user.email.split('@')[0])
 
     if request.method == 'GET':
         user = CustomUser.objects.get(id=request.user.id)
@@ -201,13 +308,19 @@ def user_profile(request):
 @permission_classes([AllowAny])
 def create_otp(request):
     user_id = request.data.get('user_id')
-    email = user_id and User.objects.filter(id=user_id).first().email 
-    if not email:
+    if not user_id:
         return error_response(
             code=400,
-            details={"email": ["This field is required"]}
+            details={"user_id": ["This field is required"]}
         )
-    
+    user = User.objects.filter(id=user_id).first()
+    if not user:
+        return error_response(
+            code=404,
+            details={"user_id": ["User does not exist."]}
+        )
+    email = user.email
+
     try:
         user = User.objects.get(email=email)
         if user.is_verified:
@@ -220,7 +333,7 @@ def create_otp(request):
             code=404,
             details={"email": ["No user exists with this email"]}
         )
-    
+
     otp = generate_otp()
     otp_data = {'email': email, 'otp': otp}
     OTP.objects.filter(email=email).delete()
@@ -229,12 +342,9 @@ def create_otp(request):
         serializer.save()
         try:
             send_otp_email(email=email, otp=otp)
-        except Exception as e:
-            return error_response(
-                code=500,
-                message="Failed to send OTP email",
-                details={"error": [str(e)]}
-            )
+        except Exception:
+            logger.exception("Failed to send OTP email to %s", email)
+            return error_response(code=500, message="Failed to send OTP email")
         return Response({"message": "OTP sent to your email"}, status=status.HTTP_201_CREATED)
     return error_response(code=400, details=serializer.errors)
 
@@ -249,10 +359,10 @@ def verify_otp_reset(request):
             code=400,
             details={"user_id": ["User does not exist."]}
         )
-    
-    # Now it's safe to use user.email   
+
+    # Now it's safe to use user.email
     email = user.email
-    
+
     if not email or not otp_value:
         details = {}
         if not email:
@@ -260,21 +370,13 @@ def verify_otp_reset(request):
         if not otp_value:
             details["otp"] = ["This field is required"]
         return error_response(code=400, details=details)
-    
+
     try:
         otp_obj = OTP.objects.get(email=email)
-        if otp_obj.otp != otp_value:
-            return error_response(
-                code=400,
-                details={"otp": ["The provided OTP is invalid"]}
-            )
-        if otp_obj.is_expired():
-            return error_response(
-                code=400,
-                details={"otp": ["The OTP has expired"]}
-            )
-            
-       
+        otp_error = check_otp(otp_obj, otp_value)
+        if otp_error:
+            return otp_error
+
         secret_key = str(uuid.uuid4())
         otp_obj.secret_key = secret_key
         otp_obj.save()
@@ -283,16 +385,14 @@ def verify_otp_reset(request):
         return error_response(
             code=404,
             details={"email": ["No OTP found for this email"]})
-        
-        
+
+
 @api_view(['POST'])
+@permission_classes([AllowAny])
 def verify_otp(request):
-    print("Request data:", request.data)
     user_id = request.data.get('user_id')
-    print(user_id)
     otp_value = request.data.get('otp')
-    user = User.objects.filter(id=user_id).first()
-    
+
     if not user_id or not otp_value:
         details = {}
         if not user_id:
@@ -300,21 +400,20 @@ def verify_otp(request):
         if not otp_value:
             details["otp"] = ["This field is required"]
         return error_response(code=400, details=details)
-    
-    
+
+    user = User.objects.filter(id=user_id).first()
+    if not user:
+        return error_response(
+            code=404,
+            details={"user_id": ["User does not exist."]}
+        )
+
     try:
         otp_obj = OTP.objects.get(email=user.email)
-        if otp_obj.otp != otp_value:
-            return error_response(
-                code=400,
-                details={"otp": ["The provided OTP is invalid"]}
-            )
-        if otp_obj.is_expired():
-            return error_response(
-                code=400,
-                details={"otp": ["The OTP has expired"]}
-            )
-        
+        otp_error = check_otp(otp_obj, otp_value)
+        if otp_error:
+            return otp_error
+
         # Verify the user
         try:
             user = User.objects.get(email=user.email)
@@ -327,18 +426,18 @@ def verify_otp(request):
             user.is_active = True  # Activate user after verification
             user.save()
             otp_obj.delete()
-            
+
             # Generate JWT tokens
             refresh = RefreshToken.for_user(user)
-            
+
             # Ensure UserProfile exists
             try:
                 profile = user.user_profile
             except UserProfile.DoesNotExist:
-                profile = UserProfile.objects.create(user=user, name=user.email.split('@')[0])
-            
+                profile = UserProfile.objects.create(user=user, first_name=user.email.split('@')[0])
+
             profile_serializer = UserProfileSerializer(profile)
-            return Response({
+            response = Response({
                 "message": "Email verified successfully",
                 "access_token": str(refresh.access_token),
                 "refresh_token": str(refresh),
@@ -347,6 +446,7 @@ def verify_otp(request):
                 "is_verified": user.is_verified,
                 "profile": profile_serializer.data
             }, status=status.HTTP_200_OK)
+            return set_auth_cookies(response, refresh)
         except User.DoesNotExist:
             return error_response(
                 code=404,
@@ -367,7 +467,7 @@ def request_password_reset(request):
             code=400,
             details={"email": ["This field is required"]}
         )
-    
+
     try:
         user = User.objects.get(email=email)
         if not user.is_verified:
@@ -390,12 +490,9 @@ def request_password_reset(request):
         serializer.save()
         try:
             send_otp_email(email=email, otp=otp)
-        except Exception as e:
-            return error_response(
-                code=500,
-                message="Failed to send OTP email",
-                details={"error": [str(e)]}
-            )
+        except Exception:
+            logger.exception("Failed to send OTP email to %s", email)
+            return error_response(code=500, message="Failed to send OTP email")
         return Response({"message": "OTP sent to your email","user_id":user_id }, status=status.HTTP_201_CREATED)
     return error_response(code=400, details=serializer.errors)
 
@@ -404,15 +501,15 @@ def request_password_reset(request):
 def reset_password(request):
     user_id = request.data.get('user_id')
     secret_key = request.data.get('secret_key')
-    
+
     user = User.objects.filter(id=user_id).first()
     if not user:
         return error_response(
             code=400,
             details={"user_id": ["User does not exist."]}
         )
-    
-    # Now it's safe to use user.email   
+
+    # Now it's safe to use user.email
     email = user.email
     new_password = request.data.get('new_password')
 
@@ -428,13 +525,13 @@ def reset_password(request):
 
     try:
         otp_obj = OTP.objects.get(email=email)
-        if otp_obj.secret_key != secret_key:
+        if not otp_obj.secret_key or not secrets.compare_digest(otp_obj.secret_key, str(secret_key)):
             return error_response(
                 code=400,
                 details={"secret_key": ["The provided secret key is invalid"]}
             )
-        
-       
+
+
         user = User.objects.get(email=email)
         if not user.is_verified:
             return error_response(
@@ -479,6 +576,11 @@ def change_password(request):
         return error_response(code=400, details=details)
 
     user = request.user
+    if not user.has_usable_password():
+        return error_response(
+            code=400,
+            details={"current_password": ["This account signs in with Google and has no password"]}
+        )
     if not user.check_password(current_password):
         return error_response(
             code=400,
@@ -504,19 +606,27 @@ def change_password(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def get_access_token_by_refresh_token(request):
-    refresh_token = request.data.get('refresh_token')
+    # Mobile clients send the token in the body; the web app uses the httpOnly cookie
+    refresh_token = request.data.get('refresh_token') or request.COOKIES.get(settings.AUTH_COOKIE_REFRESH)
     if not refresh_token:
         return error_response(
-            code=400,
+            code=401,
             details={"refresh_token": ["This field is required"]}
         )
     try:
         refresh = RefreshToken(refresh_token)
-        access_token = str(refresh.access_token)
-        return Response({"access_token": access_token}, status=status.HTTP_200_OK)
-    except Exception as e:
-        return error_response(
-            code=400,
-            details={"error": [str(e)]}
-        )
-   
+        access_token = refresh.access_token
+    except Exception:
+        return clear_auth_cookies(error_response(
+            code=401,
+            details={"refresh_token": ["Invalid or expired refresh token"]}
+        ))
+    response = Response({"access_token": str(access_token)}, status=status.HTTP_200_OK)
+    return set_access_cookie(response, access_token)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def logout(request):
+    """Clear the httpOnly auth cookies."""
+    return clear_auth_cookies(Response({"message": "Logged out"}, status=status.HTTP_200_OK))

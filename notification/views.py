@@ -14,6 +14,6 @@ def save_fcm_token(request):
     if not token:
         return Response({"error": "Token is required"}, status=400)
     
-    # Create or ignore if already exists
-    obj, created = FCMToken.objects.get_or_create(user=request.user, token=token)
+    # A device token belongs to whoever is logged in on that device now
+    obj, created = FCMToken.objects.update_or_create(token=token, defaults={"user": request.user})
     return Response({"success": True, "created": created})

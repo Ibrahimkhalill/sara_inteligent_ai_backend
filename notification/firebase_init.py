@@ -4,7 +4,9 @@ import firebase_admin
 from firebase_admin import credentials
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-cred_path = os.path.join(BASE_DIR, "notification", "ailearningauthentication-firebase-adminsdk-fbsvc-21f1cf7705.json")
+cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH") or os.path.join(
+    BASE_DIR, "notification", "ailearningauthentication-firebase-adminsdk-fbsvc-21f1cf7705.json"
+)
 
 # Initialize Firebase app only if not already initialized
 if not firebase_admin._apps:
